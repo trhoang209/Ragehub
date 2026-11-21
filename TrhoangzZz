@@ -1,517 +1,1003 @@
+-- Lunyx | Steal An Egg - Auto Farm
+-- Target place: 107778070777162
+-- Client-side Luau. Uses normal Humanoid movement and the game's current remote layout.
+
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UIS = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
-local Lighting = game:GetService("Lighting")
-local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserGameSettings = UserSettings():GetService("UserGameSettings")
+local PathfindingService = game:GetService("PathfindingService")
 local LocalPlayer = Players.LocalPlayer
-local Camera = Workspace.CurrentCamera
-print("[RageHub] boot: services ok")
-local function hasFn(v) return type(v) == "function" end
-local executorName = "unknown"
-pcall(function() executorName = identifyexecutor() or "unknown" end)
-print(string.format("[RageHub] probe: %s | hookmeta=%s moverel=%s gethui=%s",
-    tostring(executorName), tostring(hasFn(hookmetamethod)), tostring(hasFn(mousemoverel)), tostring(hasFn(gethui))))
-local DRAWING_OK = pcall(function() local l = Drawing.new("Line") l:Remove() end)
-local MOUSE_OK = hasFn(mousemoverel) and pcall(function() mousemoverel(0, 0) end)
+
 local CONFIG = {
-    enabled = true, toggleKey = Enum.KeyCode.RightShift, unloadKey = Enum.KeyCode.RightControl,
-    aimlock = true, aimKey = "Both", aimMethod = "Camera", smooth = 4, wallCheck = true,
-    showFov = true, fovRadius = 70, fovColor = Color3.fromRGB(60, 255, 100), fovThickness = 2.5,
-    box = true, boxThickness = 2, boxColor = Color3.fromRGB(255, 255, 255),
-    tracer = true, tracerColor = Color3.fromRGB(255, 255, 255), tracerOriginY = 55,
-    counterColor = Color3.fromRGB(255, 25, 25), counterSize = 48,
-    healthBar = true, healthColor = Color3.fromRGB(60, 255, 100), barWidth = 4,
-    teamCheck = true, maxDistance = 2500,
-    enemyColor = Color3.fromRGB(255, 60, 60), allyColor = Color3.fromRGB(90, 200, 255),
-    outlineColor = Color3.new(0, 0, 0), textSize = 13, fixLag = false,
+    AutoStart = true,
+    AutoPlaceEggs = true,
+    AutoHatch = true,
+    AutoEquipPets = true,
+    AutoClaimOffline = true,
+    AutoTrainWhenNoEggs = true,
+    AutoUpgradeTreadmill = true,
+
+    PreferBestEgg = true,
+    MinEggIncome = 0,             -- 0 = no minimum; examples: 1e6, 1e9
+    MaxWalkDistance = 6000,
+    MoveTimeout = 55,
+    CarryTimeout = 18,
+    TrainSeconds = 18,
+    UpgradeCashReserve = 0,
+    LoopDelay = 0.6,
+
+    ShowPanel = true,
 }
-if not DRAWING_OK then
-    CONFIG.box, CONFIG.healthBar = false, false
-    CONFIG.showFov, CONFIG.tracer = false, false
+
+local previousController = _G.LunyxEggFarmController
+if type(previousController) == "table" and type(previousController.Stop) == "function" then
+    pcall(previousController.Stop)
+    task.wait(0.2)
 end
-local savedState = {}
-local function applyFixLag(on)
-    if on then
-        if not savedState.lighting then
-            savedState.lighting = {}
-            pcall(function()
-                savedState.lighting.Technology = Lighting.Technology
-                savedState.lighting.GlobalShadows = Lighting.GlobalShadows
-                savedState.lighting.Brightness = Lighting.Brightness
-                savedState.lighting.OutdoorAmbient = Lighting.OutdoorAmbient
-                savedState.lighting.FogEnd = Lighting.FogEnd
-                savedState.lighting.FogStart = Lighting.FogStart
-                savedState.lighting.EnvironmentDiffuseScale = Lighting.EnvironmentDiffuseScale
-                savedState.lighting.EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale
-            end)
-            pcall(function() savedState.quality = UserGameSettings.SavedQualityLevel end)
-            pcall(function() savedState.decoration = Workspace.Terrain.Decoration end)
-            pcall(function() savedState.throttling = Workspace.InterpolationThrottling end)
-            savedState.effects = {}
-            pcall(function()
-                for _, c in ipairs(Lighting:GetChildren()) do
-                    if c:IsA("PostEffect") or c:IsA("Atmosphere") then savedState.effects[c] = c.Enabled end
-                end
-            end)
-            pcall(function()
-                savedState.effectConn = Lighting.DescendantAdded:Connect(function(c)
-                    if CONFIG.fixLag and (c:IsA("PostEffect") or c:IsA("Atmosphere")) then pcall(function() c.Enabled = false end) end
-                end)
-            end)
-            savedState.particles = {}
-            pcall(function()
-                for _, d in ipairs(Workspace:GetDescendants()) do
-                    if d:IsA("ParticleEmitter") or d:IsA("Beam") or d:IsA("Fire") or d:IsA("Smoke") or d:IsA("Sparkles") then
-                        savedState.particles[d] = d.Enabled
-                        d.Enabled = false
-                    end
-                end
-            end)
-            pcall(function()
-                savedState.particleConn = Workspace.DescendantAdded:Connect(function(d)
-                    if CONFIG.fixLag and (d:IsA("ParticleEmitter") or d:IsA("Beam") or d:IsA("Fire") or d:IsA("Smoke") or d:IsA("Sparkles")) then pcall(function() d.Enabled = false end) end
-                end)
-            end)
-        end
-        pcall(function() Lighting.Technology = Enum.Technology.Legacy end)
-        pcall(function()
-            Lighting.GlobalShadows = false
-            Lighting.Brightness = 0
-            Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
-            Lighting.FogEnd = 600
-            Lighting.FogStart = 200
-            Lighting.EnvironmentDiffuseScale = 0
-            Lighting.EnvironmentSpecularScale = 0
+
+local RUNNING = true
+local PAUSED = not CONFIG.AutoStart
+local STATUS = "Starting"
+local STATS = { stolen = 0, placed = 0, hatched = 0, equipped = 0, failed = 0 }
+local MY_PLOT, MY_PEN, MY_CENTER, MY_TREADMILL
+local IS_CARRYING = false
+local STOP_REASON = nil
+
+local REMOTES = {
+    PlotState       = "RF/Homestead/AskState",
+    AreaEggs        = "RF/EggWorld/AskFieldEggSnapshot",
+    CarryEgg        = "RF/EggWorld/AskFieldEggCarry",
+    EggSnapshot     = "RF/EggWorld/AskLiveSnapshot",
+    PlaceEgg        = "RF/EggWorld/AskPlaceEgg",
+    HatchEgg        = "RF/EggWorld/AskHatch",
+    FinishHatch     = "RF/EggWorld/AskFinishHatch",
+    PetSnapshot     = "RF/PenRoster/AskLiveSnapshot",
+    EquipLimit      = "RF/PenRoster/AskWearLimit",
+    EquipPet        = "RF/PenRoster/AskWear",
+    OfflineSummary  = "RF/AwayEarnings/FetchSummary",
+    OfflineRedeem   = "RF/AwayEarnings/AskCollect",
+    TreadmillUp     = "RF/Treadmill/AskTierRaise",
+}
+
+local function waitWhilePaused()
+    while RUNNING and PAUSED do task.wait(0.2) end
+    return RUNNING
+end
+
+local function remoteRoot()
+    local packages = ReplicatedStorage:FindFirstChild("Packages")
+    local root = packages and packages:FindFirstChild("Networking")
+    return root or ReplicatedStorage:FindFirstChild("Network")
+end
+
+local function invoke(key, ...)
+    local root = remoteRoot()
+    if not root then return false, "network root missing" end
+
+    local name = REMOTES[key] or key
+    local remote = root:FindFirstChild(name)
+    if not remote and name:sub(1, 3) == "RF/" then
+        remote = root:FindFirstChild(name:gsub("^RF/", "RE/"))
+    elseif not remote and name:sub(1, 3) == "RE/" then
+        remote = root:FindFirstChild(name:gsub("^RE/", "RF/"))
+    end
+    if not remote then return false, "remote missing: " .. name end
+
+    local args = table.pack(...)
+    if remote:IsA("RemoteFunction") then
+        local result = table.pack(pcall(function()
+            return remote:InvokeServer(table.unpack(args, 1, args.n))
+        end))
+        if not result[1] then return false, tostring(result[2]) end
+        return true, table.unpack(result, 2, result.n)
+    elseif remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
+        local ok, err = pcall(function()
+            remote:FireServer(table.unpack(args, 1, args.n))
         end)
-        pcall(function()
-            for _, c in ipairs(Lighting:GetChildren()) do
-                if c:IsA("PostEffect") or c:IsA("Atmosphere") then c.Enabled = false end
-            end
-        end)
-        pcall(function()
-            for d, _ in pairs(savedState.particles or {}) do d.Enabled = false end
-        end)
-        pcall(function() Workspace.Terrain.Decoration = false end)
-        pcall(function() Workspace.InterpolationThrottling = Enum.InterpolationThrottlingStatus.Enabled end)
-        pcall(function() UserGameSettings.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel0 end)
-        pcall(function() Workspace.Terrain.MaxExtents = Vector3.new(2000, 256, 2000) end)
-        pcall(function() Workspace.Terrain.WaterWaveSize = 0; Workspace.Terrain.WaterWaveSpeed = 0 end)
-        return
+        return ok, ok and true or tostring(err)
     end
-    if not savedState.lighting then return end
-    local s = savedState.lighting
-    pcall(function() Lighting.Technology = s.Technology end)
-    pcall(function()
-        Lighting.GlobalShadows = s.GlobalShadows
-        Lighting.Brightness = s.Brightness
-        Lighting.OutdoorAmbient = s.OutdoorAmbient
-        Lighting.FogEnd = s.FogEnd
-        Lighting.FogStart = s.FogStart
-        Lighting.EnvironmentDiffuseScale = s.EnvironmentDiffuseScale
-        Lighting.EnvironmentSpecularScale = s.EnvironmentSpecularScale
-    end)
-    pcall(function()
-        for effect, wasEnabled in pairs(savedState.effects or {}) do effect.Enabled = wasEnabled end
-    end)
-    pcall(function()
-        for d, wasEnabled in pairs(savedState.particles or {}) do d.Enabled = wasEnabled end
-    end)
-    if savedState.decoration ~= nil then pcall(function() Workspace.Terrain.Decoration = savedState.decoration end) end
-    if savedState.throttling ~= nil then pcall(function() Workspace.InterpolationThrottling = savedState.throttling end) end
-    if savedState.quality then pcall(function() UserGameSettings.SavedQualityLevel = savedState.quality end) end
+    return false, "unsupported remote type: " .. remote.ClassName
 end
-local function makeSquare(filled)
-    if not DRAWING_OK then return nil end
-    local ok, s = pcall(function() return Drawing.new("Square") end)
-    if not ok or not s then return nil end
-    s.Filled = filled == true; s.Visible = false; return s
-end
-local function makeLine()
-    if not DRAWING_OK then return nil end
-    local ok, l = pcall(function() return Drawing.new("Line") end)
-    if not ok or not l then return nil end
-    l.Visible = false; return l
-end
-local function buildEntry()
-    local e = { d = {} }
-    e.d.outline = makeSquare(false)
-    if e.d.outline then e.d.outline.Thickness = CONFIG.boxThickness + 1; e.d.outline.Color = CONFIG.outlineColor end
-    e.d.box = makeSquare(false)
-    if e.d.box then e.d.box.Thickness = CONFIG.boxThickness end
-    e.d.tracer = makeLine()
-    e.d.barBg = makeSquare(true)
-    e.d.barFill = makeSquare(true)
-    return e
-end
-local cache = {}
-local function entryFor(player) local e = cache[player]; if not e then e = buildEntry(); cache[player] = e end; return e end
-local function hideBoxParts(e)
-    if e.d.box and e.d.box.Visible then e.d.box.Visible = false end
-    if e.d.outline and e.d.outline.Visible then e.d.outline.Visible = false end
-end
-local function hideOverlay(e)
-    hideBoxParts(e)
-    if e.d.barBg then e.d.barBg.Visible = false end
-    if e.d.barFill then e.d.barFill.Visible = false end
-end
-local function hideEntry(e) hideOverlay(e); if e.d.tracer and e.d.tracer.Visible then e.d.tracer.Visible = false end end
-local function killEntry(e) for _, obj in pairs(e.d) do pcall(function() obj:Remove() end) end end
-local function isAlly(player) local mt, pt = LocalPlayer.Team, player.Team; if mt ~= nil and pt ~= nil then return mt == pt end; return false end
-local function passesFilter(player) if CONFIG.teamCheck and LocalPlayer.Team ~= nil then return not isAlly(player) end; return true end
-local function toScreen(worldPos) local v, onScreen = Camera:WorldToViewportPoint(worldPos); return Vector2.new(v.X, v.Y), onScreen, v.Z end
-local function screenCenter() local vp = Camera.ViewportSize; return Vector2.new(vp.X * 0.5, vp.Y * 0.5) end
-local function projectBox(character)
-    local head = character:FindFirstChild("Head"); local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not head or not hrp or not head:IsA("BasePart") or not hrp:IsA("BasePart") then return nil end
-    local topWorld = Vector3.new(hrp.Position.X, head.Position.Y + (head.Size.Y * 0.5) + 0.35, hrp.Position.Z)
-    local bottomWorld = Vector3.new(hrp.Position.X, hrp.Position.Y - (hrp.Size.Y * 0.5) - 2.15, hrp.Position.Z)
-    local top, topOn = toScreen(topWorld); local bot, botOn = toScreen(bottomWorld)
-    if not topOn or not botOn then return nil end
-    local height = bot.Y - top.Y; if height < 4 then return nil end
-    return { x = top.X - (height * 0.25), y = top.Y, w = height * 0.5, h = height, distance = (hrp.Position - Camera.CFrame.Position).Magnitude }
-end
-local healthOverride = {}
-local function healthFractionFor(player, character)
-    local ov = healthOverride[player]; if ov then return ov.frac end
-    local hum = character:FindFirstChildOfClass("Humanoid"); if not hum then return nil end
-    local maxH = hum.MaxHealth; if not maxH or maxH <= 0 then maxH = 100 end; local cur = hum.Health
-    for _, src in ipairs({ character, hum }) do
-        for _, key in ipairs({ "Health", "health", "HP", "hp" }) do
-            local av = src:GetAttribute(key); if type(av) == "number" then cur = av end
-            local vv = src:FindFirstChild(key); if vv and vv:IsA("ValueBase") and type(vv.Value) == "number" then cur = vv.Value end
-        end
-        for _, key in ipairs({ "MaxHealth", "maxHealth", "MaxHP" }) do
-            local av = src:GetAttribute(key); if type(av) == "number" and av > 0 then maxH = av end
-        end
+
+local function requireDirectory(path)
+    local node = ReplicatedStorage
+    for segment in path:gmatch("[^%.]+") do
+        node = node and node:FindFirstChild(segment)
     end
-    return math.clamp(cur, 0, maxH) / maxH
+    if not node or not node:IsA("ModuleScript") then return nil end
+    local ok, value = pcall(require, node)
+    if not ok or type(value) ~= "table" then return nil end
+    if type(value.Directory) == "table" then return value.Directory, value end
+    return value, value
 end
-local function playersAndNums(args)
-    local found, nums = {}, {}
-    local function addPlayer(p) if p and not table.find(found, p) then table.insert(found, p) end end
-    local function scanValue(v, depth)
-        if depth > 2 then return end; local t = typeof(v)
-        if t == "Instance" then
-            if v:IsA("Player") then addPlayer(v)
-            elseif v:IsA("Model") then addPlayer(Players:GetPlayerFromCharacter(v))
-            elseif v:IsA("Humanoid") and v.Parent then addPlayer(Players:GetPlayerFromCharacter(v.Parent)) end
-        elseif t == "number" then
-            local byId = Players:GetPlayerByUserId(v); if byId then addPlayer(byId) elseif v < 100000 then table.insert(nums, v) end
-        elseif t == "string" then addPlayer(Players:FindFirstChild(v))
-        elseif t == "table" then for _, sub in pairs(v) do scanValue(sub, depth + 1) end end
+
+local ASSETS = requireDirectory("Data.Assets") or requireDirectory("Directory.Assets") or {}
+local GUARDS = requireDirectory("Data.Guards") or requireDirectory("Directory.Guards") or {}
+local TREADMILLS, TREAD_MODULE = requireDirectory("Data.Treadmills")
+TREADMILLS = TREADMILLS or requireDirectory("Directory.Treadmills") or {}
+
+local function characterParts()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not root or not humanoid or humanoid.Health <= 0 then return nil end
+    return char, root, humanoid
+end
+
+local function walkSegment(destination, timeout)
+    local _, root, humanoid = characterParts()
+    if not root then return false end
+
+    humanoid:MoveTo(destination)
+    local started = os.clock()
+    while RUNNING and os.clock() - started < (timeout or 10) do
+        if not waitWhilePaused() then return false end
+        local _, currentRoot = characterParts()
+        if not currentRoot then return false end
+        if (currentRoot.Position - destination).Magnitude <= 4.5 then return true end
+        task.wait(0.12)
     end
-    for _, a in ipairs(args) do scanValue(a, 0) end; return found, nums
-end
-local function applyRemoteEvent(re, args)
-    local found, nums = playersAndNums(args); if #found == 0 or #nums == 0 then return end
-    local ln = re.Name:lower(); local isDamage = ln:find("damage") or ln:find("hurt") or ln:find("hit") or ln:find("attack")
-    for _, p in ipairs(found) do
-        local char = p.Character; local hum = char and char:FindFirstChildOfClass("Humanoid")
-        local maxH = (hum and hum.MaxHealth and hum.MaxHealth > 0 and hum.MaxHealth) or 100; local val = nums[1]
-        if isDamage then
-            local curF = (healthOverride[p] and healthOverride[p].frac) or 1
-            healthOverride[p] = { frac = math.clamp(curF - val / maxH, 0, 1) }
-        else healthOverride[p] = { frac = math.clamp(val / maxH, 0, 1) } end
-    end
-end
-local sniffed = {}
-local function sniffRemote(re)
-    if sniffed[re] then return end; sniffed[re] = true; local ln = re.Name:lower()
-    if ln:find("damage") or ln:find("health") or ln:find("hurt") or ln:find("hit") or ln:find("combat") or ln:find("attack") then
-        pcall(function() re.OnClientEvent:Connect(function(...) applyRemoteEvent(re, { ... }) end) end)
-    end
-end
-for _, d in ipairs(ReplicatedStorage:GetDescendants()) do if d:IsA("RemoteEvent") then sniffRemote(d) end end
-ReplicatedStorage.DescendantAdded:Connect(function(d) if d:IsA("RemoteEvent") then sniffRemote(d) end end)
-local function drawSolidBox(e, geo, color)
-    if e.d.outline then e.d.outline.Size = Vector2.new(geo.w + 2, geo.h + 2); e.d.outline.Position = Vector2.new(geo.x - 1, geo.y - 1); e.d.outline.Thickness = CONFIG.boxThickness + 1; e.d.outline.Visible = true end
-    if e.d.box then e.d.box.Size = Vector2.new(geo.w, geo.h); e.d.box.Position = Vector2.new(geo.x, geo.y); e.d.box.Color = color; e.d.box.Thickness = CONFIG.boxThickness; e.d.box.Visible = true end
-end
-local enemyCount = 0
-local function renderPlayer(player)
-    local e = entryFor(player); local character = player.Character
-    if not character then hideEntry(e); return end
-    local hum = character:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then hideEntry(e); return end
-    if not passesFilter(player) then hideEntry(e); return end
-    local hrp = character:FindFirstChild("HumanoidRootPart"); local dist = math.huge
-    if hrp then dist = (hrp.Position - Camera.CFrame.Position).Magnitude end
-    if dist > CONFIG.maxDistance then hideEntry(e); return end
-    local geo = projectBox(character)
-    if CONFIG.tracer and e.d.tracer then
-        if geo then
-            e.d.tracer.From = Vector2.new(Camera.ViewportSize.X * 0.5, CONFIG.tracerOriginY); e.d.tracer.To = Vector2.new(geo.x + geo.w * 0.5, geo.y)
-            e.d.tracer.Color = CONFIG.tracerColor; e.d.tracer.Thickness = 1; e.d.tracer.Visible = true
-            if not isAlly(player) then enemyCount = enemyCount + 1 end
-        else e.d.tracer.Visible = false end
-    elseif e.d.tracer then e.d.tracer.Visible = false end
-    if not geo then hideOverlay(e); return end
-    hideBoxParts(e)
-    if CONFIG.box then drawSolidBox(e, geo, CONFIG.boxColor) end
-    local frac = healthFractionFor(player, character)
-    if CONFIG.healthBar and frac and e.d.barBg and e.d.barFill then
-        local bx = geo.x - CONFIG.barWidth - 4
-        e.d.barBg.Size = Vector2.new(CONFIG.barWidth + 2, geo.h + 2); e.d.barBg.Position = Vector2.new(bx - 1, geo.y - 1); e.d.barBg.Color = CONFIG.outlineColor; e.d.barBg.Visible = true
-        local fh = geo.h * frac
-        e.d.barFill.Size = Vector2.new(CONFIG.barWidth, fh); e.d.barFill.Position = Vector2.new(bx, geo.y + geo.h - fh); e.d.barFill.Color = CONFIG.healthColor; e.d.barFill.Visible = true
-    else
-        if e.d.barBg then e.d.barBg.Visible = false end
-        if e.d.barFill then e.d.barFill.Visible = false end
-    end
-end
-local fovCircle = nil; local countText = nil; local countText2 = nil
-if DRAWING_OK then
-    pcall(function() fovCircle = Drawing.new("Circle"); fovCircle.Thickness = CONFIG.fovThickness; fovCircle.NumSides = 64; fovCircle.Filled = false; fovCircle.Color = CONFIG.fovColor; fovCircle.Visible = false end)
-    pcall(function()
-        countText = Drawing.new("Text"); countText.Size = CONFIG.counterSize; countText.Center = true; countText.Outline = true; countText.OutlineColor = Color3.new(0, 0, 0); countText.Color = CONFIG.counterColor; countText.Visible = false
-        pcall(function() countText.Font = 2 end); pcall(function() countText.Font = Enum.Font.Code end)
-        countText2 = Drawing.new("Text"); countText2.Size = CONFIG.counterSize; countText2.Center = true; countText2.Outline = false; countText2.Color = CONFIG.counterColor; countText2.Visible = false
-        pcall(function() countText2.Font = 2 end); pcall(function() countText2.Font = Enum.Font.Code end)
-    end)
-end
-local aimKeyDown = false; local locked = nil; local aimFrameCount = 0
-local internalRay = false
-local rayParams = RaycastParams.new()
-rayParams.FilterType = Enum.RaycastFilterType.Exclude
-rayParams.IgnoreWater = true
-local function matchAimKey(input)
-    local k = CONFIG.aimKey
-    if k == "LMB" then return input.UserInputType == Enum.UserInputType.MouseButton1 end
-    if k == "RMB" then return input.UserInputType == Enum.UserInputType.MouseButton2 end
-    if k == "Q" then return input.KeyCode == Enum.KeyCode.Q end
-    if k == "E" then return input.KeyCode == Enum.KeyCode.E end
-    if k == "Both" then return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.MouseButton2 end
     return false
 end
-local function aimPoint(character)
-    local head = character:FindFirstChild("Head"); if head then return head.Position end
-    local hrp = character:FindFirstChild("HumanoidRootPart"); return hrp and hrp.Position or nil
-end
-local function headVisible(player)
-    local character = player.Character; if not character then return false, nil end
-    local head = character:FindFirstChild("Head"); if not head then return false, nil end
-    local camPos = Camera.CFrame.Position; local excl = { Camera }
-    if LocalPlayer.Character then table.insert(excl, LocalPlayer.Character) end
-    table.insert(excl, character); rayParams.FilterDescendantsInstances = excl
-    local points = { head.Position, head.Position + Vector3.new(0, head.Size.Y * 0.4, 0), head.Position + Vector3.new(head.Size.X * 0.4, 0, 0), head.Position - Vector3.new(head.Size.X * 0.4, 0, 0) }
-    for _, p in ipairs(points) do
-        local dir = p - camPos
-        if dir.Magnitude > 0.1 then
-            internalRay = true
-            local hit = Workspace:Raycast(camPos, dir, rayParams)
-            internalRay = false
-            if not hit then return true, p end
+
+local cachedControls
+local function setPlayerControlsEnabled(enabled)
+    if not cachedControls then
+        local scripts = LocalPlayer:FindFirstChild("PlayerScripts")
+        local moduleScript = scripts and scripts:FindFirstChild("PlayerModule")
+        if moduleScript and moduleScript:IsA("ModuleScript") then
+            local ok, module = pcall(require, moduleScript)
+            if ok and type(module) == "table" and type(module.GetControls) == "function" then
+                local controlsOk, controls = pcall(function() return module:GetControls() end)
+                if controlsOk then cachedControls = controls end
+            end
         end
     end
-    return false, nil
+    if cachedControls then
+        pcall(function()
+            if enabled then cachedControls:Enable() else cachedControls:Disable() end
+        end)
+    end
 end
-local function targetValid(player)
-    if player == LocalPlayer then return false end; local character = player.Character; if not character then return false end
-    local hum = character:FindFirstChildOfClass("Humanoid"); if not hum or hum.Health <= 0 then return false end
-    if not passesFilter(player) then return false end; if not aimPoint(character) then return false end; return true
+
+local function walkToCore(destination, tolerance)
+    tolerance = tolerance or 5
+    local _, root = characterParts()
+    if not root then return false end
+    if (root.Position - destination).Magnitude <= tolerance then return true end
+
+    local deadline = os.clock() + CONFIG.MoveTimeout
+    for attempt = 1, 3 do
+        if not RUNNING or os.clock() > deadline then return false end
+        if not waitWhilePaused() then return false end
+        local _, currentRoot = characterParts()
+        if not currentRoot then return false end
+
+        local path = PathfindingService:CreatePath({
+            AgentRadius = 2.5,
+            AgentHeight = 6,
+            AgentCanJump = true,
+            WaypointSpacing = 7,
+        })
+        local ok = pcall(function() path:ComputeAsync(currentRoot.Position, destination) end)
+        if ok and path.Status == Enum.PathStatus.Success then
+            local waypoints = path:GetWaypoints()
+            local reachedAll = true
+            for index = 2, #waypoints do
+                if not RUNNING or os.clock() > deadline then return false end
+                if not waitWhilePaused() then return false end
+                local wp = waypoints[index]
+                local _, _, hum = characterParts()
+                if not hum then return false end
+                if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
+                local reached = walkSegment(wp.Position, math.min(12, math.max(3, deadline - os.clock())))
+                if not reached then reachedAll = false break end
+            end
+            local _, finalRoot = characterParts()
+            if reachedAll and finalRoot and (finalRoot.Position - destination).Magnitude <= tolerance + 3 then
+                return true
+            end
+        else
+            if not walkSegment(destination, math.min(10, math.max(3, deadline - os.clock()))) then
+                task.wait(0.25)
+            else
+                return true
+            end
+        end
+    end
+    return false
 end
-local function inFov(player)
-    local pos = aimPoint(player.Character); if not pos then return false end
-    local sp, on = toScreen(pos); if not on then return false end; return (sp - screenCenter()).Magnitude <= CONFIG.fovRadius
+
+local function walkTo(destination, tolerance)
+    setPlayerControlsEnabled(false)
+    local ok, result = pcall(walkToCore, destination, tolerance)
+    setPlayerControlsEnabled(true)
+    if not ok then
+        warn("[Lunyx Egg Farm] movement error: " .. tostring(result))
+        return false
+    end
+    return result == true
 end
-local function pickTarget()
-    local myChar = LocalPlayer.Character; local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart"); if not myHrp then return nil end
-    local best, bestD = nil, math.huge
-    for _, p in ipairs(Players:GetPlayers()) do
-        if targetValid(p) and inFov(p) then
-            if not CONFIG.wallCheck or headVisible(p) then
-                local c = p.Character; local root = c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("Head")
-                if root then local d = (root.Position - myHrp.Position).Magnitude; if d < bestD then best, bestD = p, d end end
+
+local function resolvePlot()
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return false end
+
+    local found
+    local ok, state = invoke("PlotState")
+    if ok and type(state) == "table" and type(state.OwnersBySlot) == "table" then
+        for slot, ownerId in pairs(state.OwnersBySlot) do
+            if tonumber(ownerId) == LocalPlayer.UserId then
+                found = plots:FindFirstChild(tostring(slot))
+                break
+            end
+        end
+    end
+
+    if not found then
+        for _, plot in ipairs(plots:GetChildren()) do
+            local sign = plot:FindFirstChild("PlotSign")
+            if sign then
+                for _, item in ipairs(sign:GetDescendants()) do
+                    if item:IsA("TextLabel") and item.Text == LocalPlayer.Name then
+                        found = plot
+                        break
+                    end
+                end
+            end
+            if found then break end
+        end
+    end
+
+    if not found then return false end
+    local update = found:FindFirstChild("ToUpdate")
+    local pen = update and update:FindFirstChild("PetArea")
+    local center = found:FindFirstChild("CenterPoint") or pen
+    if not pen or not center or not pen:IsA("BasePart") or not center:IsA("BasePart") then
+        return false
+    end
+
+    MY_PLOT = found
+    MY_PEN = pen
+    MY_CENTER = center
+    MY_TREADMILL = found:FindFirstChild("TreadmillBottom")
+    return true
+end
+
+local function myEggRecords()
+    local ok, snapshot = invoke("EggSnapshot")
+    if not ok or type(snapshot) ~= "table" then return {} end
+    local records = {}
+    for _, ownerEntry in pairs(snapshot) do
+        if type(ownerEntry) == "table" and tonumber(ownerEntry.OwnerUserId) == LocalPlayer.UserId then
+            for uid, record in pairs(ownerEntry.Records or {}) do
+                records[uid] = record
+            end
+        end
+    end
+    return records
+end
+
+local function myPetRecords()
+    local ok, snapshot = invoke("PetSnapshot")
+    if not ok or type(snapshot) ~= "table" then return {}, 0 end
+    local pets, count = {}, 0
+    for _, ownerEntry in pairs(snapshot) do
+        if type(ownerEntry) == "table" and tonumber(ownerEntry.OwnerUserId) == LocalPlayer.UserId then
+            for uid, record in pairs(ownerEntry.Records or {}) do
+                pets[#pets + 1] = { uid = uid, income = tonumber(record.MoneyPerSecond) or 0 }
+                count = count + 1
+            end
+        end
+    end
+    table.sort(pets, function(a, b) return a.income > b.income end)
+    return pets, count
+end
+
+local function recordCount(records)
+    local n = 0
+    for _ in pairs(records) do n = n + 1 end
+    return n
+end
+
+local function eggIncome(record)
+    local definition = ASSETS[record.AssetCategory]
+    if not definition then return 0 end
+    local scale = tonumber(record.AssetScale or record.Scale) or 1
+    local income = (tonumber(definition.EarningRate) or 0) * (scale ^ 1.85)
+    local mutations = record.Mutations
+    if type(mutations) == "table" then
+        local count = 0
+        for _ in pairs(mutations) do count = count + 1 end
+        if count > 0 then income = income * (2.5 ^ count) end
+    end
+    return income
+end
+
+local function eggWeight(record)
+    local definition = ASSETS[record.AssetCategory]
+    return definition and definition.Egg and tonumber(definition.Egg.WeightKg) or 1
+end
+
+local function guardSpeed(areaId)
+    local guard = GUARDS[areaId]
+    return guard and tonumber(guard.WalkSpeed) or nil
+end
+
+local function getCandidates()
+    local ok, snapshot = invoke("AreaEggs")
+    if not ok or type(snapshot) ~= "table" then return {} end
+
+    local _, root, humanoid = characterParts()
+    if not root or not humanoid then return {} end
+
+    local records = snapshot.Records or {}
+    local candidates = {}
+    for _, record in pairs(records) do
+        if record.State == "Slot" and record.Uid and typeof(record.BottomCFrame) == "CFrame" then
+            local distance = (record.BottomCFrame.Position - root.Position).Magnitude
+            local weightMultiplier = math.clamp(1 - 0.04 * eggWeight(record), 0.25, 1)
+            local required = guardSpeed(record.AreaId)
+            local safe = not required or humanoid.WalkSpeed * weightMultiplier >= required * 0.9
+            local income = eggIncome(record)
+            if safe and distance <= CONFIG.MaxWalkDistance and income >= CONFIG.MinEggIncome then
+                candidates[#candidates + 1] = {
+                    record = record,
+                    position = record.BottomCFrame.Position,
+                    distance = distance,
+                    income = income,
+                }
+            end
+        end
+    end
+
+    table.sort(candidates, function(a, b)
+        if CONFIG.PreferBestEgg and a.income ~= b.income then
+            return a.income > b.income
+        end
+        return a.distance < b.distance
+    end)
+    return candidates
+end
+
+local function findCarryPrompt(position)
+    local best, bestDistance
+    for _, item in ipairs(workspace:GetDescendants()) do
+        if item:IsA("ProximityPrompt") and item.Name == "CarryAreaEgg" then
+            local part = item.Parent
+            if part and part:IsA("BasePart") then
+                local distance = (part.Position - position).Magnitude
+                if distance <= 15 and (not bestDistance or distance < bestDistance) then
+                    best, bestDistance = item, distance
+                end
             end
         end
     end
     return best
 end
-local function cameraAim(pos, factor) local camCF = Camera.CFrame; local targetCF = CFrame.new(camCF.Position, pos); Camera.CFrame = camCF:Lerp(targetCF, factor) end
-local function mouseAim(pos, factor, maxStep, deadzone)
-    local rel = Camera.CFrame:PointToObjectSpace(pos); local dx, dy
-    if rel.Z > 0 then local sp, on = toScreen(pos); if not on then return end; local c = screenCenter(); dx = (sp.X - c.X) * factor; dy = (sp.Y - c.Y) * factor
-    else local sign = rel.X >= 0 and 1 or -1; dx = sign * maxStep * 0.5; dy = 0 end
-    if math.abs(dx) < deadzone and math.abs(dy) < deadzone then return end
-    mousemoverel(math.clamp(dx, -maxStep, maxStep), math.clamp(dy, -maxStep, maxStep))
-end
-local function aimFrame()
-    if not CONFIG.aimlock then locked = nil; return end
-    if not aimKeyDown then locked = nil; return end
-    if locked and (not targetValid(locked) or not inFov(locked) or (CONFIG.wallCheck and not headVisible(locked))) then locked = nil end
-    if not locked then locked = pickTarget() end
-    if not locked then return end
-    local pos
-    if CONFIG.wallCheck then
-        local vis, pt = headVisible(locked)
-        if not vis then locked = nil; return end
-        pos = pt
-    else
-        pos = aimPoint(locked.Character)
-    end
-    if not pos then return end
-    if CONFIG.aimMethod == "Mouse" and MOUSE_OK then
-        aimFrameCount = aimFrameCount + 1
-        if aimFrameCount % 2 == 0 then mouseAim(pos, math.clamp((11 - CONFIG.smooth) * 0.05, 0.1, 0.6), 25, 2) end
-    else
-        cameraAim(pos, math.clamp((11 - CONFIG.smooth) * 0.12, 0.15, 1))
-    end
-end
-RunService:BindToRenderStep("RageHubAim", Enum.RenderPriority.Camera.Value + 1, aimFrame)
-local function fovStep() if fovCircle then fovCircle.Position = screenCenter(); fovCircle.Radius = CONFIG.fovRadius; fovCircle.Color = CONFIG.fovColor; fovCircle.Thickness = CONFIG.fovThickness; fovCircle.Visible = CONFIG.aimlock and CONFIG.showFov end end
-local renderConn = RunService.RenderStepped:Connect(function()
-    Camera = Workspace.CurrentCamera or Camera; if not Camera then return end; fovStep(); enemyCount = 0
-    if not CONFIG.enabled then for _, e in pairs(cache) do hideEntry(e) end; if countText then countText.Visible = false end; if countText2 then countText2.Visible = false end; return end
-    local list = Players:GetPlayers(); for i = 1, #list do local player = list[i]; if player ~= LocalPlayer then pcall(renderPlayer, player) end end
-    if countText then local txt = tostring(enemyCount); local pos = Vector2.new(Camera.ViewportSize.X * 0.5, 2); countText.Text = txt; countText.Position = pos; countText.Visible = CONFIG.tracer; if countText2 then countText2.Text = txt; countText2.Position = pos + Vector2.new(1, 1); countText2.Visible = CONFIG.tracer end end
-end)
 
-local THEME = { bg = Color3.fromRGB(14, 14, 18), header = Color3.fromRGB(20, 20, 26), rowHover = Color3.fromRGB(28, 28, 36), stroke = Color3.fromRGB(45, 45, 55), text = Color3.fromRGB(225, 225, 230), textDim = Color3.fromRGB(145, 145, 155), accent1 = Color3.fromRGB(255, 70, 70), accent2 = Color3.fromRGB(160, 60, 220), switchOn = Color3.fromRGB(90, 200, 120), switchOff = Color3.fromRGB(52, 52, 60), knob = Color3.fromRGB(245, 245, 248), btnBg = Color3.fromRGB(36, 36, 46) }
-local gui = Instance.new("ScreenGui"); gui.Name = "ragehub_menu"; gui.ResetOnSpawn = false; gui.DisplayOrder = 999999
-local attachedVia = nil
-do
-    local okH, h = pcall(function() return gethui and gethui() or nil end)
-    if okH and h then local ok = pcall(function() gui.Parent = h end); if ok and gui.Parent then attachedVia = "gethui" end end
-    if not attachedVia then local ok = pcall(function() gui.Parent = game:GetService("CoreGui") end); if ok and gui.Parent then attachedVia = "coregui" end end
-    if not attachedVia then local ok = pcall(function() local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 10); gui.Parent = pg end); if ok and gui.Parent then attachedVia = "playergui" end end
-end
-if attachedVia then print("[RageHub] menu attached via " .. attachedVia) else print("[RageHub] MENU FAIL: khong gan duoc gui") end
-local main = Instance.new("Frame"); main.Name = "main"; main.Size = UDim2.fromOffset(196, 0); main.Position = UDim2.fromOffset(16, 16); main.BackgroundColor3 = THEME.bg; main.BorderSizePixel = 0; main.AutomaticSize = Enum.AutomaticSize.Y; main.Parent = gui
-local mainCorner = Instance.new("UICorner"); mainCorner.CornerRadius = UDim.new(0, 8); mainCorner.Parent = main
-local mainStroke = Instance.new("UIStroke"); mainStroke.Color = THEME.stroke; mainStroke.Thickness = 1; mainStroke.Parent = main
-local mainLayout = Instance.new("UIListLayout"); mainLayout.FillDirection = Enum.FillDirection.Vertical; mainLayout.SortOrder = Enum.SortOrder.LayoutOrder; mainLayout.Parent = main
-local header = Instance.new("Frame"); header.Size = UDim2.new(1, 0, 0, 30); header.BackgroundColor3 = THEME.header; header.BorderSizePixel = 0; header.LayoutOrder = 0; header.Parent = main
-local title = Instance.new("TextLabel"); title.Text = "RageHub"; title.Size = UDim2.new(1, -110, 1, 0); title.Position = UDim2.fromOffset(11, 0); title.BackgroundTransparency = 1; title.TextXAlignment = Enum.TextXAlignment.Left; title.Font = Enum.Font.GothamBlack; title.TextSize = 15; title.TextColor3 = Color3.new(1, 1, 1); title.Parent = header
-local titleGrad = Instance.new("UIGradient"); titleGrad.Color = ColorSequence.new(THEME.accent1, THEME.accent2); titleGrad.Parent = title
-local subtitle = Instance.new("TextLabel"); subtitle.Text = "By Tr Hoàng"; subtitle.Size = UDim2.fromOffset(58, 12); subtitle.Position = UDim2.new(1, -92, 0.5, -5); subtitle.BackgroundTransparency = 1; subtitle.Font = Enum.Font.Gotham; subtitle.TextSize = 9; subtitle.TextColor3 = THEME.textDim; subtitle.TextXAlignment = Enum.TextXAlignment.Right; subtitle.Parent = header
-local minBtn = Instance.new("TextButton"); minBtn.Text = "–"; minBtn.Size = UDim2.fromOffset(22, 22); minBtn.Position = UDim2.new(1, -28, 0, 4); minBtn.BackgroundColor3 = THEME.btnBg; minBtn.TextColor3 = THEME.text; minBtn.Font = Enum.Font.GothamBold; minBtn.TextSize = 14; minBtn.AutoButtonColor = false; minBtn.BorderSizePixel = 0; minBtn.Parent = header
-local minCorner = Instance.new("UICorner"); minCorner.CornerRadius = UDim.new(0, 5); minCorner.Parent = minBtn
-minBtn.MouseEnter:Connect(function() TweenService:Create(minBtn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(52, 52, 66)}):Play() end)
-minBtn.MouseLeave:Connect(function() TweenService:Create(minBtn, TweenInfo.new(0.15), {BackgroundColor3 = THEME.btnBg}):Play() end)
-local accentBar = Instance.new("Frame"); accentBar.Size = UDim2.new(1, 0, 0, 2); accentBar.BorderSizePixel = 0; accentBar.LayoutOrder = 1; accentBar.Parent = main
-local accentGrad = Instance.new("UIGradient"); accentGrad.Color = ColorSequence.new(THEME.accent1, THEME.accent2); accentGrad.Parent = accentBar
-local tabBar = Instance.new("Frame"); tabBar.Size = UDim2.new(1, 0, 0, 28); tabBar.BackgroundTransparency = 1; tabBar.LayoutOrder = 2; tabBar.Parent = main
-local function makeTabButton(text, posX) local btn = Instance.new("TextButton"); btn.Text = text; btn.Size = UDim2.fromScale(0.333, 1); btn.Position = UDim2.fromScale(posX, 0); btn.BackgroundTransparency = 1; btn.Font = Enum.Font.GothamBold; btn.TextSize = 11; btn.TextColor3 = THEME.textDim; btn.AutoButtonColor = false; btn.Parent = tabBar; return btn end
-local aimTabBtn = makeTabButton("AIM", 0); local espTabBtn = makeTabButton("ESP", 0.333); local settingsTabBtn = makeTabButton("SET", 0.666)
-local underline = Instance.new("Frame"); underline.Size = UDim2.new(0.333, -10, 0, 2); underline.Position = UDim2.new(0, 5, 1, -2); underline.BorderSizePixel = 0; underline.Parent = tabBar
-local underGrad = Instance.new("UIGradient"); underGrad.Color = ColorSequence.new(THEME.accent1, THEME.accent2); underGrad.Parent = underline
-local function makePage(order) local page = Instance.new("Frame"); page.Size = UDim2.new(1, 0, 0, 0); page.AutomaticSize = Enum.AutomaticSize.Y; page.BackgroundTransparency = 1; page.LayoutOrder = order; page.Parent = main; local lay = Instance.new("UIListLayout"); lay.Padding = UDim.new(0, 2); lay.Parent = page; local pad = Instance.new("UIPadding"); pad.PaddingTop = UDim.new(0, 6); pad.PaddingBottom = UDim.new(0, 8); pad.PaddingLeft = UDim.new(0, 7); pad.PaddingRight = UDim.new(0, 7); pad.Parent = page; return page end
-local aimPage = makePage(3); local espPage = makePage(4); local settingsPage = makePage(5)
-local activeTab = "aimbot"
-local function setTab(name)
-    activeTab = name; aimPage.Visible = (name == "aimbot"); espPage.Visible = (name == "esp"); settingsPage.Visible = (name == "settings")
-    TweenService:Create(aimTabBtn, TweenInfo.new(0.15), { TextColor3 = name == "aimbot" and THEME.accent1 or THEME.textDim }):Play()
-    TweenService:Create(espTabBtn, TweenInfo.new(0.15), { TextColor3 = name == "esp" and THEME.accent1 or THEME.textDim }):Play()
-    TweenService:Create(settingsTabBtn, TweenInfo.new(0.15), { TextColor3 = name == "settings" and THEME.accent1 or THEME.textDim }):Play()
-    local positions = { aimbot = UDim2.new(0, 5, 1, -2), esp = UDim2.new(0.333, 5, 1, -2), settings = UDim2.new(0.666, 5, 1, -2) }
-    TweenService:Create(underline, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Position = positions[name] }):Play()
-end
-aimTabBtn.MouseButton1Click:Connect(function() setTab("aimbot") end); espTabBtn.MouseButton1Click:Connect(function() setTab("esp") end); settingsTabBtn.MouseButton1Click:Connect(function() setTab("settings") end)
-local refreshFns = {}; local TWEEN_FAST = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-local function refreshAll() for _, fn in ipairs(refreshFns) do fn() end end
-local function makeRow(page, order, height) local row = Instance.new("Frame"); row.Size = UDim2.new(1, 0, 0, height or 27); row.BackgroundColor3 = THEME.rowHover; row.BackgroundTransparency = 1; row.BorderSizePixel = 0; row.LayoutOrder = order; row.Parent = page; local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 6); corner.Parent = row; row.MouseEnter:Connect(function() TweenService:Create(row, TweenInfo.new(0.15), {BackgroundTransparency = 0}):Play() end); row.MouseLeave:Connect(function() TweenService:Create(row, TweenInfo.new(0.15), {BackgroundTransparency = 1}):Play() end); return row end
-local function makeLabel(row, text) local lbl = Instance.new("TextLabel"); lbl.Text = text; lbl.Size = UDim2.new(1, -70, 0, 16); lbl.Position = UDim2.fromOffset(9, 5); lbl.BackgroundTransparency = 1; lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.TextColor3 = THEME.text; lbl.Font = Enum.Font.GothamMedium; lbl.TextSize = 12; lbl.Parent = row; return lbl end
-local function addSwitch(page, order, labelText, get, set)
-    local row = makeRow(page, order); makeLabel(row, labelText)
-    local track = Instance.new("TextButton"); track.Size = UDim2.fromOffset(36, 19); track.Position = UDim2.new(1, -44, 0.5, -9); track.BackgroundColor3 = THEME.switchOff; track.Text = ""; track.AutoButtonColor = false; track.BorderSizePixel = 0; track.Parent = row
-    local trackCorner = Instance.new("UICorner"); trackCorner.CornerRadius = UDim.new(1, 0); trackCorner.Parent = track
-    local knob = Instance.new("Frame"); knob.Size = UDim2.fromOffset(13, 13); knob.Position = UDim2.fromOffset(3, 3); knob.BackgroundColor3 = THEME.knob; knob.BorderSizePixel = 0; knob.Parent = track
-    local knobCorner = Instance.new("UICorner"); knobCorner.CornerRadius = UDim.new(1, 0); knobCorner.Parent = knob
-    local function refresh(animate) local on = get(); if animate then TweenService:Create(track, TWEEN_FAST, { BackgroundColor3 = on and THEME.switchOn or THEME.switchOff }):Play(); TweenService:Create(knob, TWEEN_FAST, { Position = on and UDim2.fromOffset(20, 3) or UDim2.fromOffset(3, 3) }):Play() else track.BackgroundColor3 = on and THEME.switchOn or THEME.switchOff; knob.Position = on and UDim2.fromOffset(20, 3) or UDim2.fromOffset(3, 3) end end
-    track.MouseButton1Click:Connect(function() set(not get()); refresh(true) end); refresh(false); table.insert(refreshFns, function() refresh(true) end)
-end
-local function addSlider(page, order, labelText, min, max, get, set)
-    local row = makeRow(page, order, 40)
-    local lbl = Instance.new("TextLabel"); lbl.Text = labelText; lbl.Size = UDim2.new(1, -70, 0, 16); lbl.Position = UDim2.fromOffset(9, 3); lbl.BackgroundTransparency = 1; lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.TextColor3 = THEME.text; lbl.Font = Enum.Font.GothamMedium; lbl.TextSize = 12; lbl.Parent = row
-    local valLbl = Instance.new("TextLabel"); valLbl.Size = UDim2.fromOffset(46, 16); valLbl.Position = UDim2.new(1, -54, 0, 3); valLbl.BackgroundTransparency = 1; valLbl.TextXAlignment = Enum.TextXAlignment.Right; valLbl.TextColor3 = THEME.accent1; valLbl.Font = Enum.Font.GothamBold; valLbl.TextSize = 11; valLbl.Parent = row
-    local track = Instance.new("TextButton"); track.Size = UDim2.new(1, -18, 0, 4); track.Position = UDim2.new(0, 9, 0, 27); track.BackgroundColor3 = Color3.fromRGB(48, 48, 58); track.BorderSizePixel = 0; track.Text = ""; track.AutoButtonColor = false; track.Parent = row
-    local trackCorner = Instance.new("UICorner"); trackCorner.CornerRadius = UDim.new(1, 0); trackCorner.Parent = track
-    local fill = Instance.new("Frame"); fill.Size = UDim2.fromScale(0, 1); fill.BackgroundColor3 = THEME.accent1; fill.BorderSizePixel = 0; fill.Parent = track
-    local fillCorner = Instance.new("UICorner"); fillCorner.CornerRadius = UDim.new(1, 0); fillCorner.Parent = fill
-    local knob = Instance.new("Frame"); knob.Size = UDim2.fromOffset(12, 12); knob.Position = UDim2.new(0, -6, 0.5, -6); knob.BackgroundColor3 = THEME.knob; knob.BorderSizePixel = 0; knob.Parent = track
-    local knobCorner = Instance.new("UICorner"); knobCorner.CornerRadius = UDim.new(1, 0); knobCorner.Parent = knob
-    local function refresh() local v = math.clamp(get(), min, max); local f = (v - min) / (max - min); fill.Size = UDim2.fromScale(f, 1); knob.Position = UDim2.new(f, -6, 0.5, -6); valLbl.Text = tostring(math.floor(v + 0.5)) end
-    local sliding = false
-    local function updateFromX(x) local absX = track.AbsolutePosition.X; local w = track.AbsoluteSize.X; if w <= 0 then return end; local f = math.clamp((x - absX) / w, 0, 1); set(min + (max - min) * f); refresh() end
-    track.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then sliding = true; updateFromX(input.Position.X); input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then sliding = false end end) end end)
-    UIS.InputChanged:Connect(function(input) if not sliding then return end; if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then updateFromX(input.Position.X) end end)
-    refresh(); table.insert(refreshFns, refresh)
-end
-local COLOR_PRESETS = { Color3.fromRGB(255, 255, 255), Color3.fromRGB(0, 0, 0), Color3.fromRGB(255, 25, 25), Color3.fromRGB(255, 80, 80), Color3.fromRGB(200, 0, 0), Color3.fromRGB(255, 140, 0), Color3.fromRGB(255, 200, 0), Color3.fromRGB(255, 255, 0), Color3.fromRGB(180, 255, 0), Color3.fromRGB(60, 255, 100), Color3.fromRGB(0, 200, 80), Color3.fromRGB(0, 255, 200), Color3.fromRGB(0, 200, 255), Color3.fromRGB(90, 200, 255), Color3.fromRGB(0, 100, 255), Color3.fromRGB(60, 60, 255), Color3.fromRGB(160, 60, 220), Color3.fromRGB(200, 0, 200), Color3.fromRGB(255, 0, 150), Color3.fromRGB(255, 100, 180), Color3.fromRGB(200, 200, 200), Color3.fromRGB(128, 128, 128), Color3.fromRGB(80, 80, 80), Color3.fromRGB(139, 69, 19), Color3.fromRGB(255, 182, 193), Color3.fromRGB(255, 218, 185), Color3.fromRGB(173, 216, 230), Color3.fromRGB(144, 238, 144), Color3.fromRGB(255, 165, 0), Color3.fromRGB(220, 20, 60), Color3.fromRGB(75, 0, 130), Color3.fromRGB(255, 255, 255) }
-local function addColorPicker(page, order, labelText, getColor, setColor)
-    local row = makeRow(page, order, 27); makeLabel(row, labelText)
-    local colorBtn = Instance.new("TextButton"); colorBtn.Size = UDim2.fromOffset(58, 19); colorBtn.Position = UDim2.new(1, -66, 0.5, -9); colorBtn.BackgroundColor3 = getColor(); colorBtn.Text = ""; colorBtn.AutoButtonColor = false; colorBtn.BorderSizePixel = 0; colorBtn.Parent = row
-    local btnCorner = Instance.new("UICorner"); btnCorner.CornerRadius = UDim.new(0, 5); btnCorner.Parent = colorBtn
-    local btnStroke = Instance.new("UIStroke"); btnStroke.Color = Color3.fromRGB(80, 80, 90); btnStroke.Thickness = 1; btnStroke.Parent = colorBtn
-    local panel = Instance.new("Frame"); panel.Size = UDim2.new(1, 0, 0, 0); panel.AutomaticSize = Enum.AutomaticSize.Y; panel.BackgroundColor3 = Color3.fromRGB(18, 18, 24); panel.BorderSizePixel = 0; panel.LayoutOrder = order + 0.5; panel.Visible = false; panel.Parent = page
-    local panelCorner = Instance.new("UICorner"); panelCorner.CornerRadius = UDim.new(0, 6); panelCorner.Parent = panel
-    local panelPad = Instance.new("UIPadding"); panelPad.PaddingTop = UDim.new(0, 8); panelPad.PaddingBottom = UDim.new(0, 8); panelPad.PaddingLeft = UDim.new(0, 9); panelPad.PaddingRight = UDim.new(0, 9); panelPad.Parent = panel
-    local gridFrame = Instance.new("Frame"); gridFrame.Size = UDim2.new(1, 0, 0, 104); gridFrame.BackgroundTransparency = 1; gridFrame.Parent = panel
-    local cellSize = 20; local cellGap = 4; local cols = 8; local totalW = cols * cellSize + (cols - 1) * cellGap
-    local function layoutCells() local gw = gridFrame.AbsoluteSize.X; if gw <= 0 then gw = 170 end; local sx = (gw - totalW) * 0.5; for i, color in ipairs(COLOR_PRESETS) do local col = (i - 1) % cols; local r = math.floor((i - 1) / cols); local cell = gridFrame:FindFirstChild("cell_" .. i); if cell then cell.Position = UDim2.fromOffset(sx + col * (cellSize + cellGap), 8 + r * (cellSize + cellGap)) end end end
-    for i, color in ipairs(COLOR_PRESETS) do
-        local cell = Instance.new("TextButton"); cell.Name = "cell_" .. i; cell.Size = UDim2.fromOffset(cellSize, cellSize); cell.BackgroundColor3 = color; cell.Text = ""; cell.AutoButtonColor = false; cell.BorderSizePixel = 0; cell.Parent = gridFrame
-        local cellCorner = Instance.new("UICorner"); cellCorner.CornerRadius = UDim.new(0, 4); cellCorner.Parent = cell
-        local cellStroke = Instance.new("UIStroke"); cellStroke.Color = Color3.fromRGB(60, 60, 70); cellStroke.Thickness = 1; cellStroke.Parent = cell
-        cell.MouseButton1Click:Connect(function() setColor(color); colorBtn.BackgroundColor3 = color end)
-        cell.MouseEnter:Connect(function() TweenService:Create(cellStroke, TweenInfo.new(0.1), { Color = Color3.fromRGB(200, 200, 220), Thickness = 2 }):Play() end)
-        cell.MouseLeave:Connect(function() TweenService:Create(cellStroke, TweenInfo.new(0.1), { Color = Color3.fromRGB(60, 60, 70), Thickness = 1 }):Play() end)
+local function stealEgg(candidate)
+    STATUS = "Walking to egg"
+    if not walkTo(candidate.position, 4) then
+        STATS.failed = STATS.failed + 1
+        return false
     end
-    colorBtn.MouseButton1Click:Connect(function() panel.Visible = not panel.Visible; if panel.Visible then task.spawn(layoutCells) end end)
-    table.insert(refreshFns, function() colorBtn.BackgroundColor3 = getColor() end)
+    local payload = { Uid = candidate.record.Uid }
+    local ok, result = invoke("CarryEgg", payload)
+    local carried = ok and (result == true or (type(result) == "table" and (result.Success == true or result.IsCarrying == true)))
+
+    if not carried then
+        local prompt = findCarryPrompt(candidate.position)
+        if prompt and type(fireproximityprompt) == "function" then
+            pcall(fireproximityprompt, prompt, 1)
+            carried = true
+        end
+    end
+
+    if carried then
+        IS_CARRYING = true
+        STATS.stolen = STATS.stolen + 1
+        return true
+    end
+    STATS.failed = STATS.failed + 1
+    return false
 end
-addSwitch(aimPage, 1, "Aimlock", function() return CONFIG.aimlock end, function(v) CONFIG.aimlock = v; refreshAll() end)
-addSwitch(aimPage, 2, "Wall Check", function() return CONFIG.wallCheck end, function(v) CONFIG.wallCheck = v end)
-addSwitch(aimPage, 3, "FOV Circle", function() return CONFIG.showFov end, function(v) CONFIG.showFov = v end)
-addSlider(aimPage, 4, "FOV Size", 20, 500, function() return CONFIG.fovRadius end, function(v) CONFIG.fovRadius = v end)
-addSwitch(espPage, 1, "ESP", function() return CONFIG.enabled end, function(v) CONFIG.enabled = v end)
-addSwitch(espPage, 2, "Box", function() return CONFIG.box end, function(v) CONFIG.box = v end)
-addSwitch(espPage, 3, "ESP Line", function() return CONFIG.tracer end, function(v) CONFIG.tracer = v end)
-addSwitch(espPage, 4, "Health", function() return CONFIG.healthBar end, function(v) CONFIG.healthBar = v end)
-addSwitch(espPage, 5, "Team Check", function() return CONFIG.teamCheck end, function(v) CONFIG.teamCheck = v end)
-addColorPicker(settingsPage, 1, "FOV Color", function() return CONFIG.fovColor end, function(v) CONFIG.fovColor = v end)
-addColorPicker(settingsPage, 2, "Line Color", function() return CONFIG.tracerColor end, function(v) CONFIG.tracerColor = v end)
-addColorPicker(settingsPage, 3, "Counter Color", function() return CONFIG.counterColor end, function(v) CONFIG.counterColor = v end)
-addColorPicker(settingsPage, 4, "Box Color", function() return CONFIG.boxColor end, function(v) CONFIG.boxColor = v end)
-addColorPicker(settingsPage, 5, "Health Color", function() return CONFIG.healthColor end, function(v) CONFIG.healthColor = v end)
-addSwitch(settingsPage, 6, "Fix Lag", function() return CONFIG.fixLag end, function(v)
-    CONFIG.fixLag = v
-    print("[RageHub] fix lag " .. (v and "ON" or "OFF"))
-    task.spawn(function()
-        local ok, err = pcall(applyFixLag, v)
-        if not ok then print("[RageHub] fix lag error: " .. tostring(err)) end
+
+local function carryHome()
+    if not MY_PEN then return false end
+    STATUS = "Returning to base"
+    local before = recordCount(myEggRecords())
+    local destination = MY_PEN.Position + Vector3.new(0, 4, 0)
+    if not walkTo(destination, 6) then return false end
+
+    local started = os.clock()
+    while RUNNING and os.clock() - started < CONFIG.CarryTimeout do
+        if not waitWhilePaused() then return false end
+        local records = myEggRecords()
+        if recordCount(records) > before then
+            IS_CARRYING = false
+            return true
+        end
+        task.wait(0.3)
+    end
+    return false
+end
+
+local function getFreeEggSpot(occupied)
+    if not MY_PEN or not MY_CENTER then return nil end
+    local maxX = math.max(3, MY_PEN.Size.X / 2 - 4)
+    local maxZ = math.max(3, MY_PEN.Size.Z / 2 - 4)
+    for x = -math.floor(maxX), math.floor(maxX), 4 do
+        for z = -math.floor(maxZ), math.floor(maxZ), 4 do
+            local world = MY_PEN.CFrame * CFrame.new(x, MY_PEN.Size.Y / 2 + 1.5, z)
+            local clear = true
+            for _, used in ipairs(occupied) do
+                if (used - world.Position).Magnitude < 5.5 then clear = false break end
+            end
+            if clear then return world end
+        end
+    end
+    return nil
+end
+
+local function placeEggs()
+    if not CONFIG.AutoPlaceEggs or not MY_PEN or not MY_CENTER then return end
+    local occupied, pending = {}, {}
+    for uid, record in pairs(myEggRecords()) do
+        if record.Placement and record.Placement.LocalCFrame then
+            occupied[#occupied + 1] = (MY_CENTER.CFrame * record.Placement.LocalCFrame).Position
+        elseif not record.Placement then
+            pending[#pending + 1] = { uid = uid, record = record }
+        end
+    end
+
+    for _, egg in ipairs(pending) do
+        if not RUNNING then return end
+        if not waitWhilePaused() then return end
+        local worldCFrame = getFreeEggSpot(occupied)
+        if not worldCFrame then break end
+        local localCFrame = MY_CENTER.CFrame:ToObjectSpace(worldCFrame)
+        local ok, result = invoke("PlaceEgg", {
+            Uid = egg.uid,
+            LocalCFrame = localCFrame,
+        })
+        if ok and result then
+            STATS.placed = STATS.placed + 1
+            occupied[#occupied + 1] = worldCFrame.Position
+        end
+        task.wait(0.2)
+    end
+end
+
+local function hatchReadyEggs()
+    if not CONFIG.AutoHatch then return end
+    local now = workspace:GetServerTimeNow()
+    for uid, record in pairs(myEggRecords()) do
+        if not RUNNING then return end
+        local placement = record.Placement
+        if placement then
+            local definition = ASSETS[record.AssetCategory]
+            local baseTime = definition and definition.Egg and tonumber(definition.Egg.GrowthTime) or 30
+            local speed = tonumber(record.GrowthSpeedMultiplier) or 1
+            local placedAt = tonumber(placement.PlacedAt) or now
+            if now - placedAt >= baseTime / math.max(0.01, speed) then
+                local ok, result = invoke("HatchEgg", uid)
+                if ok and result then
+                    task.wait(0.8)
+                    local finishOk, finishResult = invoke("FinishHatch", uid)
+                    if finishOk and finishResult then STATS.hatched = STATS.hatched + 1 end
+                end
+                task.wait(0.2)
+            end
+        end
+    end
+end
+
+local function equipNewPets()
+    if not CONFIG.AutoEquipPets then return end
+    local ok, limit = invoke("EquipLimit")
+    if not ok or type(limit) ~= "number" then limit = 13 end
+    local _, equippedCount = myPetRecords()
+    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+    local containers = { backpack, LocalPlayer.Character }
+
+    for _, container in ipairs(containers) do
+        if container then
+            for _, tool in ipairs(container:GetChildren()) do
+                if tool:IsA("Tool") and tool:GetAttribute("ItemType") == "Asset" then
+                    local uid = tool:GetAttribute("UID")
+                    if uid and equippedCount < limit then
+                        local equipOk, result = invoke("EquipPet", uid)
+                        if equipOk and result then
+                            equippedCount = equippedCount + 1
+                            STATS.equipped = STATS.equipped + 1
+                        end
+                        task.wait(0.15)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function parseCash(text)
+    local value, suffix = tostring(text):gsub("[$,%s]", ""):match("^([%d%.]+)([KMBTQkmb tq]?)$")
+    if not value then return 0 end
+    local mult = ({ K = 1e3, M = 1e6, B = 1e9, T = 1e12, Q = 1e15 })[(suffix or ""):upper()] or 1
+    return (tonumber(value) or 0) * mult
+end
+
+local function cashAmount()
+    local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    local moneyGui = gui and gui:FindFirstChild("Money")
+    if not moneyGui then return 0 end
+    for _, item in ipairs(moneyGui:GetDescendants()) do
+        if item:IsA("TextLabel") and item.Name == "Money" then
+            return parseCash(item.Text)
+        end
+    end
+    return 0
+end
+
+local function upgradeTreadmill()
+    if not CONFIG.AutoUpgradeTreadmill or type(TREADMILLS) ~= "table" then return end
+    local saveDirectory, saveModule = requireDirectory("Shared.Save")
+    if not saveDirectory then saveDirectory, saveModule = requireDirectory("Library.Modules.Save") end
+    local save
+    if saveModule and type(saveModule.Get) == "function" then
+        local ok, data = pcall(saveModule.Get)
+        if ok and type(data) == "table" then save = data end
+    end
+    local currentLevel = save and tonumber(save.TreadmillUpgradeLevel)
+    if not currentLevel then return end
+
+    local nextConfig
+    if TREAD_MODULE and type(TREAD_MODULE.GetByUpgradeLevel) == "function" then
+        local ok, config = pcall(TREAD_MODULE.GetByUpgradeLevel, currentLevel + 1)
+        if ok and type(config) == "table" then nextConfig = config end
+    end
+    if not nextConfig then
+        for _, config in pairs(TREADMILLS) do
+            if tonumber(config.UpgradeLevel) == currentLevel + 1 then nextConfig = config break end
+        end
+    end
+    if not nextConfig or not nextConfig._id then return end
+    local price = tonumber(nextConfig.Price) or math.huge
+    if cashAmount() - CONFIG.UpgradeCashReserve < price then return end
+    invoke("TreadmillUp", nextConfig._id)
+end
+
+local function claimOffline()
+    if not CONFIG.AutoClaimOffline then return end
+    local ok, summary = invoke("OfflineSummary")
+    if ok and type(summary) == "table" and (tonumber(summary.ClaimableAmount) or 0) > 0 then
+        invoke("OfflineRedeem")
+    end
+end
+
+local function train()
+    if not CONFIG.AutoTrainWhenNoEggs or not MY_TREADMILL or not MY_TREADMILL:IsA("BasePart") then
+        task.wait(2)
+        return
+    end
+    STATUS = "Training on treadmill"
+    local target = MY_TREADMILL.Position + Vector3.new(0, 4, 0)
+    if walkTo(target, 5) then
+        local start = os.clock()
+        while RUNNING and os.clock() - start < CONFIG.TrainSeconds do
+            if not waitWhilePaused() then return end
+            local _, root = characterParts()
+            if not root or (root.Position - target).Magnitude > 9 then
+                walkTo(target, 5)
+            end
+            task.wait(0.5)
+        end
+    end
+end
+
+local function processBase()
+    STATUS = "Managing base"
+    placeEggs()
+    hatchReadyEggs()
+    equipNewPets()
+    upgradeTreadmill()
+end
+
+-- UI | Lunyx compact control panel
+local panel, statusLabel, toggleButton
+local function buildPanel()
+    if not CONFIG.ShowPanel then return end
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then return end
+    local old = playerGui:FindFirstChild("LunyxEggFarm")
+    if old then old:Destroy() end
+
+    local UserInputService = game:GetService("UserInputService")
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "LunyxEggFarm"
+    gui.ResetOnSpawn = false
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent = playerGui
+
+    local function corner(object, radius)
+        local item = Instance.new("UICorner")
+        item.CornerRadius = UDim.new(0, radius)
+        item.Parent = object
+        return item
+    end
+
+    local function stroke(object, color, transparency, thickness)
+        local item = Instance.new("UIStroke")
+        item.Color = color
+        item.Transparency = transparency or 0
+        item.Thickness = thickness or 1
+        item.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        item.Parent = object
+        return item
+    end
+
+    local function label(parent, name, size, position, text, textSize, color, font)
+        local item = Instance.new("TextLabel")
+        item.Name = name
+        item.Size = size
+        item.Position = position
+        item.BackgroundTransparency = 1
+        item.Text = text or ""
+        item.TextColor3 = color or Color3.fromRGB(225, 235, 247)
+        item.TextSize = textSize or 12
+        item.Font = font or Enum.Font.Gotham
+        item.TextXAlignment = Enum.TextXAlignment.Left
+        item.TextYAlignment = Enum.TextYAlignment.Center
+        item.Parent = parent
+        return item
+    end
+
+    -- Main shell
+    local shadow = Instance.new("Frame")
+    shadow.Name = "Shadow"
+    shadow.Size = UDim2.fromOffset(294, 184)
+    shadow.Position = UDim2.new(0, 21, 0.42, 5)
+    shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    shadow.BackgroundTransparency = 0.48
+    shadow.BorderSizePixel = 0
+    shadow.ZIndex = 0
+    shadow.Parent = gui
+    corner(shadow, 13)
+
+    local frame = Instance.new("Frame")
+    frame.Name = "MainPanel"
+    frame.Size = UDim2.fromOffset(294, 184)
+    frame.Position = UDim2.new(0, 18, 0.42, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(15, 21, 33)
+    frame.BorderSizePixel = 0
+    frame.ClipsDescendants = true
+    frame.ZIndex = 1
+    frame.Parent = gui
+    corner(frame, 12)
+    stroke(frame, Color3.fromRGB(59, 91, 127), 0.2, 1)
+
+    local frameGradient = Instance.new("UIGradient")
+    frameGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(23, 34, 51)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(12, 17, 27)),
+    })
+    frameGradient.Rotation = 90
+    frameGradient.Parent = frame
+
+    -- Header
+    local header = Instance.new("Frame")
+    header.Name = "Header"
+    header.Size = UDim2.new(1, 0, 0, 48)
+    header.BackgroundColor3 = Color3.fromRGB(24, 39, 58)
+    header.BorderSizePixel = 0
+    header.ZIndex = 2
+    header.Parent = frame
+
+    local accent = Instance.new("Frame")
+    accent.Size = UDim2.new(1, 0, 0, 2)
+    accent.Position = UDim2.new(0, 0, 1, -2)
+    accent.BackgroundColor3 = Color3.fromRGB(65, 211, 225)
+    accent.BorderSizePixel = 0
+    accent.ZIndex = 3
+    accent.Parent = header
+
+    local brandMark = Instance.new("Frame")
+    brandMark.Size = UDim2.fromOffset(29, 29)
+    brandMark.Position = UDim2.fromOffset(12, 9)
+    brandMark.BackgroundColor3 = Color3.fromRGB(39, 178, 194)
+    brandMark.BorderSizePixel = 0
+    brandMark.ZIndex = 3
+    brandMark.Parent = header
+    corner(brandMark, 9)
+
+    local brandLetter = label(brandMark, "BrandLetter", UDim2.fromScale(1, 1), UDim2.fromOffset(0, -1), "L", 19, Color3.fromRGB(8, 23, 34), Enum.Font.GothamBlack)
+    brandLetter.TextXAlignment = Enum.TextXAlignment.Center
+    brandLetter.ZIndex = 4
+
+    local title = label(header, "Title", UDim2.new(1, -93, 0, 19), UDim2.fromOffset(50, 8), "LUNYX", 13, Color3.fromRGB(242, 247, 255), Enum.Font.GothamBold)
+    title.ZIndex = 3
+    title.Active = true
+    local subtitle = label(header, "Subtitle", UDim2.new(1, -93, 0, 14), UDim2.fromOffset(50, 25), "STEAL AN EGG  /  AUTO FARM", 8, Color3.fromRGB(140, 169, 194), Enum.Font.GothamMedium)
+    subtitle.ZIndex = 3
+
+    local minimizeButton = Instance.new("TextButton")
+    minimizeButton.Name = "Minimize"
+    minimizeButton.Size = UDim2.fromOffset(27, 27)
+    minimizeButton.Position = UDim2.new(1, -38, 0, 10)
+    minimizeButton.BackgroundColor3 = Color3.fromRGB(42, 61, 82)
+    minimizeButton.BorderSizePixel = 0
+    minimizeButton.Text = "–"
+    minimizeButton.TextColor3 = Color3.fromRGB(220, 239, 249)
+    minimizeButton.TextSize = 22
+    minimizeButton.Font = Enum.Font.GothamMedium
+    minimizeButton.AutoButtonColor = true
+    minimizeButton.ZIndex = 4
+    minimizeButton.Parent = header
+    corner(minimizeButton, 8)
+
+    -- Status section
+    local statusDot = Instance.new("Frame")
+    statusDot.Name = "StatusDot"
+    statusDot.Size = UDim2.fromOffset(7, 7)
+    statusDot.Position = UDim2.fromOffset(15, 64)
+    statusDot.BackgroundColor3 = Color3.fromRGB(69, 218, 154)
+    statusDot.BorderSizePixel = 0
+    statusDot.ZIndex = 3
+    statusDot.Parent = frame
+    corner(statusDot, 8)
+
+    local statusCaption = label(frame, "StatusCaption", UDim2.fromOffset(70, 15), UDim2.fromOffset(28, 59), "LIVE STATUS", 9, Color3.fromRGB(106, 205, 209), Enum.Font.GothamBold)
+    statusCaption.ZIndex = 3
+
+    statusLabel = label(frame, "Status", UDim2.new(1, -28, 0, 49), UDim2.fromOffset(14, 78), "Initializing farm...", 10, Color3.fromRGB(201, 216, 232), Enum.Font.Gotham)
+    statusLabel.TextWrapped = true
+    statusLabel.TextYAlignment = Enum.TextYAlignment.Top
+    statusLabel.ZIndex = 3
+
+    local divider = Instance.new("Frame")
+    divider.Size = UDim2.new(1, -28, 0, 1)
+    divider.Position = UDim2.fromOffset(14, 132)
+    divider.BackgroundColor3 = Color3.fromRGB(54, 71, 91)
+    divider.BackgroundTransparency = 0.25
+    divider.BorderSizePixel = 0
+    divider.ZIndex = 3
+    divider.Parent = frame
+
+    -- Controls
+    toggleButton = Instance.new("TextButton")
+    toggleButton.Name = "PauseResume"
+    toggleButton.Size = UDim2.fromOffset(124, 31)
+    toggleButton.Position = UDim2.fromOffset(14, 143)
+    toggleButton.BackgroundColor3 = Color3.fromRGB(35, 139, 157)
+    toggleButton.BorderSizePixel = 0
+    toggleButton.TextColor3 = Color3.fromRGB(245, 252, 255)
+    toggleButton.Font = Enum.Font.GothamBold
+    toggleButton.TextSize = 10
+    toggleButton.Text = PAUSED and "RESUME" or "PAUSE"
+    toggleButton.AutoButtonColor = true
+    toggleButton.ZIndex = 3
+    toggleButton.Parent = frame
+    corner(toggleButton, 8)
+    toggleButton.MouseButton1Click:Connect(function()
+        if not RUNNING then return end
+        PAUSED = not PAUSED
+        toggleButton.Text = PAUSED and "RESUME" or "PAUSE"
+        toggleButton.BackgroundColor3 = PAUSED and Color3.fromRGB(45, 145, 105) or Color3.fromRGB(35, 139, 157)
+        statusDot.BackgroundColor3 = PAUSED and Color3.fromRGB(245, 186, 75) or Color3.fromRGB(69, 218, 154)
     end)
-end)
-setTab("aimbot")
-local minimized = false
-minBtn.MouseButton1Click:Connect(function() minimized = not minimized; tabBar.Visible = not minimized; accentBar.Visible = not minimized; if minimized then aimPage.Visible = false; espPage.Visible = false; settingsPage.Visible = false else setTab(activeTab) end; minBtn.Text = minimized and "+" or "–" end)
-local dragging, dragStart, startPos = false, nil, nil
-header.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = true; dragStart = input.Position; startPos = main.Position; input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end) end end)
-UIS.InputChanged:Connect(function(input) if not dragging then return end; if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end; local cam = Workspace.CurrentCamera; local vp = cam and cam.ViewportSize or Vector2.new(1280, 720); local dx = input.Position.X - dragStart.X; local dy = input.Position.Y - dragStart.Y; local size = main.AbsoluteSize; local x = math.clamp(startPos.X.Offset + dx, 0, math.max(vp.X - size.X, 0)); local y = math.clamp(startPos.Y.Offset + dy, 0, math.max(vp.Y - size.Y, 0)); main.Position = UDim2.fromOffset(x, y) end)
-local inputConn, endedConn
-inputConn = UIS.InputBegan:Connect(function(input, processed)
-    if input.KeyCode == CONFIG.toggleKey and not processed then CONFIG.enabled = not CONFIG.enabled; refreshAll()
-    elseif input.KeyCode == CONFIG.unloadKey and not processed then _G.nyx_esp_unload()
-    elseif matchAimKey(input) and not processed then aimKeyDown = true end
-end)
-endedConn = UIS.InputEnded:Connect(function(input) if matchAimKey(input) then aimKeyDown = false end end)
-local function wire(player) if player == LocalPlayer then return end; entryFor(player); healthOverride[player] = nil; player.CharacterAdded:Connect(function() healthOverride[player] = nil end) end
-for _, player in ipairs(Players:GetPlayers()) do wire(player) end
-local addedConn = Players.PlayerAdded:Connect(wire)
-local removingConn = Players.PlayerRemoving:Connect(function(player) local e = cache[player]; if not e then return end; killEntry(e); cache[player] = nil; healthOverride[player] = nil end)
-_G.nyx_esp_unload = function()
-    CONFIG.fixLag = false
-    if renderConn then renderConn:Disconnect() end; if inputConn then inputConn:Disconnect() end; if endedConn then endedConn:Disconnect() end
-    if addedConn then addedConn:Disconnect() end; if removingConn then removingConn:Disconnect() end
-    pcall(function() RunService:UnbindFromRenderStep("RageHubAim") end)
-    if savedState.effectConn then pcall(function() savedState.effectConn:Disconnect() end) end
-    if savedState.particleConn then pcall(function() savedState.particleConn:Disconnect() end) end
-    if fovCircle then pcall(function() fovCircle:Remove() end) end; if countText then pcall(function() countText:Remove() end) end; if countText2 then pcall(function() countText2:Remove() end) end
-    for _, e in pairs(cache) do killEntry(e) end; table.clear(cache); pcall(applyFixLag, false); pcall(function() gui:Destroy() end)
-    print("[RageHub] unloaded")
+
+    local stopButton = Instance.new("TextButton")
+    stopButton.Name = "Stop"
+    stopButton.Size = UDim2.fromOffset(124, 31)
+    stopButton.Position = UDim2.fromOffset(156, 143)
+    stopButton.BackgroundColor3 = Color3.fromRGB(139, 61, 73)
+    stopButton.BorderSizePixel = 0
+    stopButton.TextColor3 = Color3.fromRGB(255, 242, 244)
+    stopButton.Font = Enum.Font.GothamBold
+    stopButton.TextSize = 10
+    stopButton.Text = "STOP FARM"
+    stopButton.AutoButtonColor = true
+    stopButton.ZIndex = 3
+    stopButton.Parent = frame
+    corner(stopButton, 8)
+    stopButton.MouseButton1Click:Connect(function()
+        RUNNING = false
+        PAUSED = false
+        STATUS = "Stopped"
+        toggleButton.Text = "STOPPED"
+        toggleButton.BackgroundColor3 = Color3.fromRGB(72, 79, 91)
+        statusDot.BackgroundColor3 = Color3.fromRGB(232, 91, 91)
+    end)
+
+    -- Small floating logo shown while the panel is minimized.
+    local miniLogo = Instance.new("TextButton")
+    miniLogo.Name = "MiniLogo"
+    miniLogo.Size = UDim2.fromOffset(48, 48)
+    miniLogo.Position = frame.Position
+    miniLogo.BackgroundColor3 = Color3.fromRGB(20, 37, 53)
+    miniLogo.BorderSizePixel = 0
+    miniLogo.Text = "L"
+    miniLogo.TextColor3 = Color3.fromRGB(87, 225, 231)
+    miniLogo.TextSize = 25
+    miniLogo.Font = Enum.Font.GothamBlack
+    miniLogo.Visible = false
+    miniLogo.AutoButtonColor = true
+    miniLogo.ZIndex = 10
+    miniLogo.Parent = gui
+    corner(miniLogo, 16)
+    stroke(miniLogo, Color3.fromRGB(73, 215, 223), 0.08, 1.5)
+
+    local logoDot = Instance.new("Frame")
+    logoDot.Name = "LogoStatusDot"
+    logoDot.Size = UDim2.fromOffset(9, 9)
+    logoDot.Position = UDim2.new(1, -10, 0, 2)
+    logoDot.BackgroundColor3 = Color3.fromRGB(69, 218, 154)
+    logoDot.BorderSizePixel = 0
+    logoDot.ZIndex = 11
+    logoDot.Parent = miniLogo
+    corner(logoDot, 8)
+
+    local function minimize()
+        miniLogo.Position = frame.Position
+        frame.Visible = false
+        shadow.Visible = false
+        miniLogo.Visible = true
+    end
+
+    local function restore()
+        frame.Visible = true
+        shadow.Visible = true
+        miniLogo.Visible = false
+    end
+
+    minimizeButton.MouseButton1Click:Connect(minimize)
+    miniLogo.MouseButton1Click:Connect(restore)
+
+    -- Drag by the title area or the compact logo.
+    local dragConnections = {}
+    local function makeDraggable(handle, target, shadowTarget)
+        local dragging = false
+        local dragInput
+        local dragStart
+        local startPosition
+
+        handle.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                dragStart = input.Position
+                startPosition = target.Position
+                input.Changed:Connect(function()
+                    if input.UserInputState == Enum.UserInputState.End then dragging = false end
+                end)
+            end
+        end)
+
+        handle.InputChanged:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+                dragInput = input
+            end
+        end)
+
+        dragConnections[#dragConnections + 1] = UserInputService.InputChanged:Connect(function(input)
+            if dragging and input == dragInput then
+                local delta = input.Position - dragStart
+                target.Position = UDim2.new(
+                    startPosition.X.Scale, startPosition.X.Offset + delta.X,
+                    startPosition.Y.Scale, startPosition.Y.Offset + delta.Y
+                )
+                if shadowTarget then
+                    shadowTarget.Position = UDim2.new(
+                        target.Position.X.Scale, target.Position.X.Offset + 3,
+                        target.Position.Y.Scale, target.Position.Y.Offset + 5
+                    )
+                end
+            end
+        end)
+    end
+
+    makeDraggable(title, frame, shadow)
+    makeDraggable(miniLogo, miniLogo, nil)
+    gui.Destroying:Connect(function()
+        for _, connection in ipairs(dragConnections) do
+            pcall(function() connection:Disconnect() end)
+        end
+    end)
+    panel = gui
 end
-if not MOUSE_OK then print("[RageHub] mousemoverel missing — method Mouse tự fallback về Camera") end
-print("[RageHub] loaded | By Tr Hoàng | menu tối giản | RightShift = on/off | RightControl = unload")
+
+local function listenCarryState()
+    local roots = { ReplicatedStorage:FindFirstChild("Network"), remoteRoot() }
+    for _, root in ipairs(roots) do
+        if root then
+            local event = root:FindFirstChild("Eggs: AreaEggCarryState")
+            if event and event:IsA("RemoteEvent") then
+                event.OnClientEvent:Connect(function(data)
+                    IS_CARRYING = type(data) == "table" and data.IsCarrying == true
+                end)
+                break
+            end
+        end
+    end
+end
+
+local function main()
+    buildPanel()
+    _G.LunyxEggFarmController = {
+        Stop = function()
+            RUNNING = false
+            STATUS = "Stopped"
+            setPlayerControlsEnabled(true)
+        end,
+    }
+    if CONFIG.ShowPanel and statusLabel then
+        task.spawn(function()
+            while RUNNING and statusLabel and statusLabel.Parent do
+                statusLabel.Text = string.format(
+                    "Status: %s\nStolen: %d | Placed: %d | Hatched: %d\nEquipped: %d | Failed: %d",
+                    STATUS, STATS.stolen, STATS.placed, STATS.hatched, STATS.equipped, STATS.failed
+                )
+                task.wait(0.35)
+            end
+        end)
+    end
+    listenCarryState()
+    claimOffline()
+
+    while RUNNING do
+        if not waitWhilePaused() then break end
+        if not MY_PLOT and not resolvePlot() then
+            STATUS = "Waiting for own base..."
+            task.wait(2)
+        else
+            processBase()
+            if IS_CARRYING then
+                local before = recordCount(myEggRecords())
+                if not carryHome() then
+                    STATUS = "Carry return timed out - retrying"
+                    task.wait(1.5)
+                end
+                processBase()
+            else
+                local candidates = getCandidates()
+                if #candidates == 0 then
+                    train()
+                else
+                    local target = candidates[1]
+                    if stealEgg(target) then
+                        local beforeCarry = recordCount(myEggRecords())
+                        if not carryHome() then
+                            -- Keep the carrying state set; the next loop will retry the route home.
+                            STATUS = "Still carrying - returning again"
+                            task.wait(1)
+                        else
+                            IS_CARRYING = false
+                            processBase()
+                        end
+                    else
+                        task.wait(0.5)
+                    end
+                end
+            end
+        end
+        task.wait(CONFIG.LoopDelay)
+    end
+
+    STATUS = STOP_REASON or "Stopped"
+    setPlayerControlsEnabled(true)
+    if panel then panel:Destroy() end
+    _G.LunyxEggFarmRunning = false
+    _G.LunyxEggFarmController = nil
+end
+
+_G.LunyxEggFarmRunning = true
+
+task.spawn(function()
+    local ok, err = pcall(main)
+    if not ok then
+        warn("[Lunyx Egg Farm] " .. tostring(err))
+        if panel then panel:Destroy() end
+        setPlayerControlsEnabled(true)
+        _G.LunyxEggFarmRunning = false
+        _G.LunyxEggFarmController = nil
+    end
+end)
